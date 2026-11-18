@@ -1,137 +1,171 @@
-# IoT Server
+# IoT Server — ESP32 Telemetry and Device Control
 
-A small Node.js and TypeScript server that sits between an ESP32 and a web
-dashboard. It listens to sensor data over MQTT, keeps it, exposes it over HTTP, and
-sends commands back to the device.
+A Node.js and TypeScript server that connects an ESP32 device to a web dashboard through MQTT and HTTP. The project demonstrates an end-to-end IoT data flow: sensor readings travel from hardware to a server and dashboard, while control commands travel back to the device.
 
-It is built for one sensor (a DHT22 temperature and humidity sensor) and one output
-device (an LED). That is deliberate. Once you can trace a single reading all the way
-from the ESP32 to a browser and a single command all the way back, adding a second
-sensor is a small change instead of a mystery.
+The current example uses a DHT22 temperature and humidity sensor and an LED output. Keeping the first version deliberately small makes the device-to-server-to-browser and browser-to-device paths easier to understand and test.
 
----
+## What it does
 
-## 1. What it does
+- Receives sensor telemetry from an ESP32 over MQTT.
+- Parses incoming messages into typed readings.
+- Keeps the latest reading available to the API.
+- Stores historical readings in PostgreSQL through Prisma.
+- Exposes telemetry and device endpoints over HTTP.
+- Publishes device commands through MQTT.
+- Includes a mock device workflow for development without physical hardware.
 
+## Architecture
+
+```text
+ESP32 + DHT22
+     |
+     | MQTT telemetry
+     v
+ MQTT broker
+     |
+     v
+Node.js / TypeScript server <---- HTTP ----> Web dashboard
+     |
+     +---- PostgreSQL (Prisma)
+
+Web dashboard ---- HTTP command ----> Server
+                                      |
+                                      | MQTT command
+                                      v
+                                  MQTT broker
+                                      |
+                                      v
+                                  ESP32 LED
 ```
-                    +--------------------------+
-                    |        MQTT Broker       |
-                    |       (HiveMQ Cloud)     |
-                    +------------+-------------+
-                       ^         |         ^
-        publishes      |         |         |     publishes
-        telemetry      |         |         |     commands
-                       |         v         |
-   +---------+         |   +-----------------------+         +----------------+
-   | ESP32   |---------+   |   THIS SERVER         |         |  Next.js       |
-   | DHT22   |             |   Node + TypeScript   |<--HTTP--|  dashboard     |
-   | LED     |<------------|                       |-------->|  (browser)     |
-   +---------+             +-----------+-----------+         +----------------+
-                                       |
-                                       v
-                               +---------------+
-                               |  PostgreSQL   |
-                               |  (Prisma)     |
-                               +---------------+
-```
 
-Note one thing in that diagram: the browser never talks to the broker. It talks to
-this server, and only this server holds the broker credentials. That is the whole
-reason this server exists.
+The browser communicates with the server over HTTP; it does not connect directly to the MQTT broker. Broker credentials therefore remain on the server.
 
-## 2. The full flow, end to end
+## Message flow
 
-**Telemetry, device to browser:**
+### Telemetry: device to dashboard
 
-1. The ESP32 reads the DHT22 and publishes JSON to `spectral/esp32/{deviceId}/sensors/dht`.
-2. The broker receives it and forwards it to every subscriber of that topic.
-3. This server is subscribed, so its message handler fires with a topic and a raw byte payload.
-4. The payload is parsed into a typed `DHT22Reading`.
-5. The reading is stored, both in memory (for "what is the value right now") and in Postgres (for history).
-6. The dashboard calls `GET /api/telemetry/latest` and renders it.
+1. The ESP32 reads the DHT22 sensor.
+2. It publishes a JSON payload to `spectral/esp32/{deviceId}/sensors/dht`.
+3. The server receives the MQTT message and parses it into a typed `DHT22Reading`.
+4. The latest reading is made available in memory and persisted to PostgreSQL.
+5. The dashboard requests the latest reading through the HTTP API.
 
-**Commands, browser to device:**
+### Control: dashboard to device
 
-1. A button in the dashboard sends `POST /api/devices/{deviceId}/led` with `{ "state": "ON" }`.
-2. This server validates it and publishes `ON` to `spectral/esp32/{deviceId}/commands/led`.
-3. The broker forwards it to the ESP32.
-4. The ESP32's callback fires and drives the LED pin.
+1. The dashboard sends a request to `POST /api/devices/{deviceId}/led`.
+2. The server validates the requested LED state.
+3. The server publishes an `ON` or `OFF` command to the device's MQTT topic.
+4. The ESP32 receives the command and updates the LED output.
 
-## 3. Topics
+## MQTT topic contract
 
 | Topic | Direction | Payload |
 |---|---|---|
-| `spectral/esp32/{deviceId}/sensors/dht` | device to server | `{"temperature":24.5,"humidity":61.2}` |
-| `spectral/esp32/{deviceId}/health` | device to server | `alive` (plain text, every 5s) |
-| `spectral/esp32/{deviceId}/commands/led` | server to device | `ON` or `OFF` |
+| `spectral/esp32/{deviceId}/sensors/dht` | Device → server | JSON temperature and humidity reading |
+| `spectral/esp32/{deviceId}/health` | Device → server | `alive` heartbeat |
+| `spectral/esp32/{deviceId}/commands/led` | Server → device | `ON` or `OFF` |
 
-The contract is the topic plus the payload shape. Nothing else. This is why a mock
-publisher running on your laptop is indistinguishable from a real ESP32 as far as
-this server is concerned.
+The topic and payload form the message contract between the device and server. A local mock publisher can use the same contract when physical hardware is unavailable.
 
-## 4. Folder guide
+## Technology
 
-Each folder has its own README explaining what it owns and, just as importantly,
-what it must never do.
+- Node.js
+- TypeScript
+- MQTT
+- Fastify
+- PostgreSQL
+- Prisma
+- ESP32 firmware
+- DHT22 sensor
+- Next.js dashboard integration
 
-| Folder | Responsibility | Docs |
+## Repository guide
+
+| Directory | Responsibility |
+|---|---|
+| `src/config/` | Environment configuration and validation |
+| `src/mqtt/` | Broker connection, subscriptions, and publishing |
+| `src/utils/` | Shared utilities such as logging |
+| `src/types/` | Shared type definitions |
+| `src/devices/` | DHT22 payload parsing and LED command creation |
+| `src/services/` | Application coordination and latest-reading state |
+| `src/api/` | Fastify server and HTTP routes |
+| `src/database/` | Prisma client and database operations |
+| `src/agent/` | AI agent tools and data-grounded responses |
+| `firmware/` | ESP32 firmware |
+| `scripts/` | Development utilities, including the mock device |
+| `ai/` | Exploratory AI and analytics work |
+
+See the README files in individual directories for more detailed component documentation.
+
+## Development progress
+
+The repository is developed incrementally, with supporting guides in `docs/`.
+
+| Stage | Guide | Outcome |
 |---|---|---|
-| `src/config/` | Read and check environment variables, expose one typed config object | [README](src/config/README.md) |
-| `src/mqtt/` | Connect to the broker, subscribe, publish. Nothing about DHT22 or LEDs | [README](src/mqtt/README.md) |
-| `src/utils/` | Small helpers with no business meaning, like logging | [README](src/utils/README.md) |
-| `src/types/` | Shared type definitions, explained one by one | [README](src/types/README.md) |
-| `src/devices/` | DHT22 parsing and LED command building | [README](src/devices/README.md) |
-| `src/services/` | Coordination and the in-memory latest reading | [README](src/services/README.md) |
-| `src/api/` | Fastify HTTP server and routes | [README](src/api/README.md) |
-| `src/database/` | Prisma client and the save and query functions | [README](src/database/README.md) |
-| `src/agent/` | The AI agent: tools, the loop, and deterministic forecasting | [README](src/agent/README.md) |
-| `src/prisma/` | Generated Prisma contract and client. Do not edit the generated files | [database README](src/database/README.md) |
-| `scripts/` | Developer tools that are not part of the server, like the mock device | [mock device](docs/02-connect-to-broker.md#running-without-hardware) |
-| `firmware/` | The ESP32 sketch: reads the DHT22, publishes, drives the LED | [README](firmware/README.md) |
-| `ai/` | Anomaly detection, predictive maintenance, and AI across IoT sectors | [README](ai/README.md) |
+| 0 | [Prerequisites](docs/00-prerequisites.md) | Development tools and broker access |
+| 1 | [Project setup](docs/01-project-setup.md) | TypeScript project setup |
+| 2 | [Connect to the broker](docs/02-connect-to-broker.md) | Receive MQTT messages |
+| 3 | [Types](docs/03-types.md) | Shared message types |
+| 4 | [Parse the DHT22 payload](docs/04-parse-dht22.md) | Convert raw messages to typed readings |
+| 5 | [In-memory store](docs/05-in-memory-store.md) | Keep the latest reading |
+| 6 | [HTTP API](docs/06-http-api.md) | Expose telemetry over HTTP |
+| 7 | [Publish commands](docs/07-publish-commands.md) | Send LED commands to the device |
+| 8 | [PostgreSQL and Prisma](docs/08-postgres-prisma.md) | Persist telemetry history |
+| 9 | Hardening | Validation, error handling, and structured logging |
+| 10 | [AI agent](docs/10-ai-agent.md) | Ask questions about IoT data |
 
-Folders appear as the build reaches them. An empty folder teaches nothing.
+The repository's development guide identifies the end of Stage 8 as the current baseline. Check the latest commits and documentation for any subsequent progress.
 
-## 5. Build steps
+## Getting started
 
-The server is built in small commits. Each step has a document explaining what
-changed and why.
+### Prerequisites
 
-| Step | Document | State at the end of it |
-|---|---|---|
-| 0 | [Prerequisites](docs/00-prerequisites.md) | Tools installed, broker credentials in hand |
-| 1 | [Project setup](docs/01-project-setup.md) | TypeScript project that runs and prints a line |
-| 2 | [Connect to the broker](docs/02-connect-to-broker.md) | Raw MQTT messages appear in your terminal |
-| 3 | [Types](docs/03-types.md) | Shared types defined and explained |
-| 4 | [Parse the DHT22 payload](docs/04-parse-dht22.md) | Raw bytes become a typed reading |
-| 5 | [Keep the latest reading](docs/05-in-memory-store.md) | State lives outside the MQTT callback |
-| 6 | [HTTP API](docs/06-http-api.md) | `GET /api/telemetry/latest` works |
-| 7 | [Publish commands](docs/07-publish-commands.md) | `POST /api/devices/:id/led` drives the LED |
-| 8 | [Store in Postgres](docs/08-postgres-prisma.md) | History survives a restart |
-| 9 | Hardening | Validation, error handling, structured logging |
-| 10 | [An AI agent over your data](docs/10-ai-agent.md) | Ask questions in English, get grounded answers and charts |
+- Node.js and npm
+- Access to an MQTT broker
+- PostgreSQL database
+- ESP32 and DHT22 hardware for physical-device testing (optional when using the mock device)
 
-**You are here: end of step 8.**
-
-## 6. Improvements
-
-Everything the core build deliberately leaves out lives in
-[docs/improvements/](docs/improvements/README.md). Read those only after step 9.
-Each one starts from a problem you will have actually felt by then, which is the
-only good reason to add complexity.
-
-## 7. Quick start
+### Install dependencies
 
 ```bash
 npm install
-cp .env.example .env      # then fill in your broker credentials
-npm run dev               # start the server, API on http://localhost:3000
-npm run mock              # in a second terminal, if you have no hardware
 ```
 
-Then:
+Create a local environment file and add the broker and database configuration expected by the application:
 
 ```bash
-curl http://localhost:3000/api/devices
-npm run plot -- --html      # ASCII chart, and a browser chart in chart.html
+cp .env.example .env
 ```
+
+Keep broker credentials and database secrets private. Do not commit `.env`.
+
+### Run the server
+
+```bash
+npm run dev
+```
+
+The API is configured for local development at `http://localhost:3000`.
+
+### Run without hardware
+
+In a second terminal, use the repository's mock-device script:
+
+```bash
+npm run mock
+```
+
+The mock publisher sends messages using the same MQTT topic and payload contract as the ESP32.
+
+## Further documentation
+
+- [Development guides](docs/)
+- [Firmware documentation](firmware/README.md)
+- [AI documentation](ai/README.md)
+- [Improvement proposals](docs/improvements/README.md)
+
+## Project status
+
+This repository is an incremental IoT engineering project. The core example focuses on one sensor and one output device; additional devices, production hardening, and expanded AI capabilities are separate extensions.
